@@ -25,6 +25,7 @@ import (
 	"github.com/ipfs/go-unixfs/importer/trickle"
 	coreiface "github.com/ipfs/interface-go-ipfs-core"
 	"github.com/ipfs/interface-go-ipfs-core/path"
+	uio "github.com/ipfs/go-unixfs/io"
 )
 
 var log = logging.Logger("coreunix")
@@ -224,25 +225,25 @@ func (adder *Adder) addNode(node ipld.Node, path string) error {
 		node = pi.Node
 	}
 
-	mr, err := adder.mfsRoot()
-	if err != nil {
-		return err
-	}
-	dir := gopath.Dir(path)
-	if dir != "." {
-		opts := mfs.MkdirOpts{
-			Mkparents:  true,
-			Flush:      false,
-			CidBuilder: adder.CidBuilder,
-		}
-		if err := mfs.Mkdir(mr, dir, opts); err != nil {
-			return err
-		}
-	}
+	// mr, err := adder.mfsRoot()
+	// if err != nil {
+	// 	return err
+	// }
+	// dir := gopath.Dir(path)
+	// if dir != "." {
+	// 	opts := mfs.MkdirOpts{
+	// 		Mkparents:  true,
+	// 		Flush:      false,
+	// 		CidBuilder: adder.CidBuilder,
+	// 	}
+	// 	if err := mfs.Mkdir(mr, dir, opts); err != nil {
+	// 		return err
+	// 	}
+	// }
 
-	if err := mfs.PutNode(mr, path, node); err != nil {
-		return err
-	}
+	// if err := mfs.PutNode(mr, path, node); err != nil {
+	// 	return err
+	// }
 
 	if !adder.Silent {
 		return outputDagnode(adder.Out, path, node)
@@ -261,61 +262,63 @@ func (adder *Adder) AddAllAndPin(file files.Node) (ipld.Node, error) {
 		}
 	}()
 
-	if err := adder.addFileNode("", file, true); err != nil {
-		return nil, err
-	}
-
-	// get root
-	mr, err := adder.mfsRoot()
-	if err != nil {
-		return nil, err
-	}
-	var root mfs.FSNode
-	rootdir := mr.GetDirectory()
-	root = rootdir
-
-	err = root.Flush()
+	// if err := adder.addFileNode("", file, true); err != nil {
+	nd, err := adder.addFileNode("", file, true)
 	if err != nil {
 		return nil, err
 	}
 
-	// if adding a file without wrapping, swap the root to it (when adding a
-	// directory, mfs root is the directory)
-	_, dir := file.(files.Directory)
-	var name string
-	if !dir {
-		children, err := rootdir.ListNames(adder.ctx)
-		if err != nil {
-			return nil, err
-		}
+	// // get root
+	// mr, err := adder.mfsRoot()
+	// if err != nil {
+	// 	return nil, err
+	// }
+	// var root mfs.FSNode
+	// rootdir := mr.GetDirectory()
+	// root = rootdir
 
-		if len(children) == 0 {
-			return nil, fmt.Errorf("expected at least one child dir, got none")
-		}
+	// err = root.Flush()
+	// if err != nil {
+	// 	return nil, err
+	// }
 
-		// Replace root with the first child
-		name = children[0]
-		root, err = rootdir.Child(name)
-		if err != nil {
-			return nil, err
-		}
-	}
+	// // if adding a file without wrapping, swap the root to it (when adding a
+	// // directory, mfs root is the directory)
+	// _, dir := file.(files.Directory)
+	// var name string
+	// if !dir {
+	// 	children, err := rootdir.ListNames(adder.ctx)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
 
-	err = mr.Close()
-	if err != nil {
-		return nil, err
-	}
+	// 	if len(children) == 0 {
+	// 		return nil, fmt.Errorf("expected at least one child dir, got none")
+	// 	}
 
-	nd, err := root.GetNode()
-	if err != nil {
-		return nil, err
-	}
+	// 	// Replace root with the first child
+	// 	name = children[0]
+	// 	root, err = rootdir.Child(name)
+	// 	if err != nil {
+	// 		return nil, err
+	// 	}
+	// }
 
-	// output directory events
-	err = adder.outputDirs(name, root)
-	if err != nil {
-		return nil, err
-	}
+	// err = mr.Close()
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	// nd, err := root.GetNode()
+	// if err != nil {
+	// 	return nil, err
+	// }
+
+	// // output directory events
+	// err = adder.outputDirs(name, root)
+	// if err != nil {
+	// 	return nil, err
+	// }
 
 	if !adder.Pin {
 		return nd, nil
@@ -323,27 +326,28 @@ func (adder *Adder) AddAllAndPin(file files.Node) (ipld.Node, error) {
 	return nd, adder.PinRoot(nd)
 }
 
-func (adder *Adder) addFileNode(path string, file files.Node, toplevel bool) error {
+// func (adder *Adder) addFileNode(path string, file files.Node, toplevel bool) error {
+func (adder *Adder) addFileNode(path string, file files.Node, toplevel bool) (ipld.Node, error) {
 	defer file.Close()
 
-	err := adder.maybePauseForGC()
-	if err != nil {
-		return err
-	}
+	// err := adder.maybePauseForGC()
+	// if err != nil {
+	// 	return err
+	// }
 
-	if adder.liveNodes >= liveCacheSize {
-		// TODO: A smarter cache that uses some sort of lru cache with an eviction handler
-		mr, err := adder.mfsRoot()
-		if err != nil {
-			return err
-		}
-		if err := mr.FlushMemFree(adder.ctx); err != nil {
-			return err
-		}
+	// if adder.liveNodes >= liveCacheSize {
+	// 	// TODO: A smarter cache that uses some sort of lru cache with an eviction handler
+	// 	mr, err := adder.mfsRoot()
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// 	if err := mr.FlushMemFree(adder.ctx); err != nil {
+	// 		return err
+	// 	}
 
-		adder.liveNodes = 0
-	}
-	adder.liveNodes++
+	// 	adder.liveNodes = 0
+	// }
+	// adder.liveNodes++
 
 	switch f := file.(type) {
 	case files.Directory:
@@ -353,27 +357,31 @@ func (adder *Adder) addFileNode(path string, file files.Node, toplevel bool) err
 	case files.File:
 		return adder.addFile(path, f)
 	default:
-		return errors.New("unknown file type")
+		return nil, errors.New("unknown file type")
 	}
 }
 
-func (adder *Adder) addSymlink(path string, l *files.Symlink) error {
+func (adder *Adder) addSymlink(path string, l *files.Symlink) (ipld.Node, error)  {
 	sdata, err := unixfs.SymlinkData(l.Target)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	dagnode := dag.NodeWithData(sdata)
 	dagnode.SetCidBuilder(adder.CidBuilder)
 	err = adder.dagService.Add(adder.ctx, dagnode)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	return adder.addNode(dagnode, path)
+	err = adder.addNode(dagnode, path)
+	if err != nil {
+		return nil, err
+	}
+	return dagnode, nil
 }
 
-func (adder *Adder) addFile(path string, file files.File) error {
+func (adder *Adder) addFile(path string, file files.File) (ipld.Node, error)  {
 	// if the progress flag was specified, wrap the file so that we can send
 	// progress updates to the client (over the output channel)
 	var reader io.Reader = file
@@ -388,41 +396,71 @@ func (adder *Adder) addFile(path string, file files.File) error {
 
 	dagnode, err := adder.add(reader)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
-	// patch it into the root
-	return adder.addNode(dagnode, path)
+	err = adder.addNode(dagnode, path)
+	if err != nil {
+		return nil, err
+	}
+	return dagnode, nil
 }
 
-func (adder *Adder) addDir(path string, dir files.Directory, toplevel bool) error {
+func (adder *Adder) addDir(path string, dir files.Directory, toplevel bool) (ipld.Node, error) {
 	log.Infof("adding directory: %s", path)
 
-	if !(toplevel && path == "") {
-		mr, err := adder.mfsRoot()
-		if err != nil {
-			return err
-		}
-		err = mfs.Mkdir(mr, path, mfs.MkdirOpts{
-			Mkparents:  true,
-			Flush:      false,
-			CidBuilder: adder.CidBuilder,
-		})
-		if err != nil {
-			return err
-		}
-	}
+	// if !(toplevel && path == "") {
+	// 	mr, err := adder.mfsRoot()
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// 	err = mfs.Mkdir(mr, path, mfs.MkdirOpts{
+	// 		Mkparents:  true,
+	// 		Flush:      false,
+	// 		CidBuilder: adder.CidBuilder,
+	// 	})
+	// 	if err != nil {
+	// 		return err
+	// 	}
+	// }
+
+	unixdir := uio.NewDirectory(adder.dagService)
 
 	it := dir.Entries()
 	for it.Next() {
 		fpath := gopath.Join(path, it.Name())
-		err := adder.addFileNode(fpath, it.Node(), false)
+		// err := adder.addFileNode(fpath, it.Node(), false)
+		nd, err := adder.addFileNode(fpath, it.Node(), false)
 		if err != nil {
-			return err
+			return nil, err
+		}
+
+		err = unixdir.AddChild(adder.ctx, it.Name(), nd)
+		if err != nil {
+			return nil, err
 		}
 	}
 
-	return it.Err()
+	dirnd, err := unixdir.GetNode()
+	if err != nil {
+		return nil, err
+	}
+
+	err = adder.dagService.Add(adder.ctx, dirnd)
+	if err != nil {
+		return nil, err
+	}
+
+	err = adder.addNode(dirnd, path)
+	if err != nil {
+		return nil, err
+	}
+
+	if it.Err() != nil {
+		return nil, it.Err()
+	}
+
+	return dirnd, nil
 }
 
 func (adder *Adder) maybePauseForGC() error {

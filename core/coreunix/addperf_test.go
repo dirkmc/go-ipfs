@@ -2,6 +2,7 @@ package coreunix
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"math/rand"
 	"strconv"
@@ -12,51 +13,85 @@ import (
 	"github.com/ipfs/go-ipfs/repo"
 
 	datastore "github.com/ipfs/go-datastore"
-	syncds "github.com/ipfs/go-datastore/sync"
+	// syncds "github.com/ipfs/go-datastore/sync"
 	config "github.com/ipfs/go-ipfs-config"
 	files "github.com/ipfs/go-ipfs-files"
 	coreiface "github.com/ipfs/interface-go-ipfs-core"
-	// badgerds "github.com/ipfs/go-ds-badger"
+	badgerds "github.com/ipfs/go-ds-badger"
 )
 
 const k = 1024
 const M = k * k
 
+// func TestAddDSCalls(t *testing.T) {
+// 	fileSizes := []int{
+// 		100 * M,
+// 		10 * M,
+// 		1 * M,
+// 		100 * k,
+// 		10 * k,
+// 		5 * k,
+// 		2 * k,
+// 		1.5 * k,
+// 		1.25 * k,
+// 		k,
+// 	}
+// 	max := fileSizes[0]
+
+// 	// itemsPerDirs := []int{ 2, 4, 8, 16, 32, 128, 256 }
+// 	itemsPerDirs := []int{ 128 }
+
+// 	fmt.Println("name\tHas\tGet\tPut\tObjects\tDuration")
+// 	for _, fileSize := range fileSizes {
+// 		fileCount := int(max / fileSize)
+// 		// fmt.Println(formatName(fileSize, fileCount))
+// 		for _, itemsPerDir := range itemsPerDirs {
+// 			testAddDSCalls(t, fileSize, fileCount, itemsPerDir)
+// 		}
+// 		// fmt.Println()
+// 	}
+// }
+
+// GO111MODULE=on go test -timeout 120m -count=1 -v ./core/coreunix/... -run TestAddDSCalls -args -itemsPerDir=32
+var itemsPerDir *int = flag.Int("itemsPerDir", 32, "the items per dir")
+
 func TestAddDSCalls(t *testing.T) {
-	fileSizes := []int{
-		100 * M,
-		10 * M,
-		1 * M,
-		100 * k,
-		10 * k,
-		5 * k,
-		2 * k,
-		1.5 * k,
-		1.25 * k,
-		k,
+	fileCounts := []int{
+		128 * k,
+		256 * k,
+		512 * k,
+		M,
+		1.5 * M,
+		2 * M,
+		2.5 * M,
+		3 * M,
+		3.5 * M,
+		4 * M,
+		8 * M,
+		16 * M,
 	}
-	max := fileSizes[0]
 
-	itemsPerDirs := []int{ 2, 4, 8, 16, 32, 128, 256 }
+	// itemsPerDirs := []int{ 2, 4, 8, 16, 32, 128, 256 }
+	// itemsPerDir := 64
+	fileSize := k
 
-	fmt.Println("items/dir\tHas\tGet\tPut\tObjects\tDuration")
-	for _, fileSize := range fileSizes {
-		fileCount := int(max / fileSize)
-		fmt.Println(formatName(fileSize, fileCount))
-		for _, itemsPerDir := range itemsPerDirs {
-			testAddDSCalls(t, fileSize, fileCount, itemsPerDir)
-		}
-		fmt.Println()
+	fmt.Printf("Running test with %d items per directory\n", *itemsPerDir)
+	fmt.Println("File Count\tDuration")
+	for _, fileCount := range fileCounts {
+		// fmt.Println(formatName(fileSize, fileCount))
+		testAddDSCalls(t, fileSize, fileCount, *itemsPerDir)
 	}
 }
 
 func testAddDSCalls(t *testing.T, fileSize int, fileCount int, itemsPerDir int) {
+	// name := formatName(fileSize, fileCount)
 	// fmt.Println("       Name          Has      Get      Put   Objects")
 	// for _, fileSize := range profiles {
 		// stats := getDSCalls(t, fileSize, fileCount, fileCount)
 		stats := getDSCalls(t, fileSize, fileCount, itemsPerDir)
 		// fmt.Printf("%14s:  %7d  %7d  %7d   %7d    %s\n", name, stats.Has, stats.Get, stats.Put, stats.objects, stats.elapsed)
-		fmt.Printf("%d\t%d\t%d\t%d\t%d\t%d\n", itemsPerDir, stats.Has, stats.Get, stats.Put, stats.objects, stats.elapsed)
+		// fmt.Printf("%s\t%d\t%d\t%d\t%d\t%d\t%d\n", name, itemsPerDir, stats.Has, stats.Get, stats.Put, stats.objects, stats.elapsed)
+		fmt.Printf("%d\t%d\n", fileCount, stats.elapsed / 1000000)
 	// }
 }
 
@@ -73,14 +108,13 @@ func formatName(fileSize int, fileCount int) string {
 
 func getDSCalls(t *testing.T, fileSize int, fileCount int, itemsPerDir int) *addPerfStats {
 	var stats = addPerfStats{}
-	apds := &addperfDatastore{MapDatastore: datastore.NewMapDatastore(), stats: &stats}
-	wrpds := syncds.MutexWrap(apds)
-	// path := fmt.Sprintf("/tmp/perf-test/badger-test-%s", time.Now())
-	// bdgds, err := badgerds.NewDatastore(path, &badgerds.DefaultOptions)
-	// if err != nil {
-	// 	t.Fatal(err)
-	// }
-	// wrpds := &addperfDatastore{MapDatastore: apds, stats: &stats}
+	// apds := &addperfDatastore{MapDatastore: datastore.NewMapDatastore(), stats: &stats}
+	// wrpds := syncds.MutexWrap(apds)
+	path := fmt.Sprintf("/tmp/perf-test/badger-test-%s", time.Now())
+	bdgds, err := badgerds.NewDatastore(path, &badgerds.DefaultOptions)
+	if err != nil {
+		t.Fatal(err)
+	}
 
 	r := &repo.Mock{
 		C: config.Config{
@@ -88,7 +122,8 @@ func getDSCalls(t *testing.T, fileSize int, fileCount int, itemsPerDir int) *add
 				PeerID: testPeerID, // required by offline node
 			},
 		},
-		D: wrpds,
+		// D: wrpds,
+		D: bdgds,
 	}
 	node, err := core.NewNode(context.Background(), &core.BuildCfg{Repo: r})
 	if err != nil {

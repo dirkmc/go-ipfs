@@ -7,7 +7,6 @@ import (
 	"io"
 	gopath "path"
 	"strconv"
-	"time"
 
 	"github.com/ipfs/go-ipfs/pin"
 
@@ -25,7 +24,7 @@ import (
 	ihelper "github.com/ipfs/go-unixfs/importer/helpers"
 	"github.com/ipfs/go-unixfs/importer/trickle"
 	coreiface "github.com/ipfs/interface-go-ipfs-core"
-	ipfspath "github.com/ipfs/interface-go-ipfs-core/path"
+	"github.com/ipfs/interface-go-ipfs-core/path"
 	uio "github.com/ipfs/go-unixfs/io"
 )
 
@@ -33,8 +32,6 @@ var log = logging.Logger("coreunix")
 
 // how many bytes of progress to wait before sending a progress update message
 const progressReaderIncrement = 1024 * 256
-
-const fileQueueConcurrency = 8
 
 var liveCacheSize = uint64(256 << 10)
 
@@ -47,7 +44,7 @@ type Link struct {
 func NewAdder(ctx context.Context, p pin.Pinner, bs bstore.GCLocker, ds ipld.DAGService) (*Adder, error) {
 	bufferedDS := ipld.NewBufferedDAG(ctx, ds)
 
-	a := &Adder{
+	return &Adder{
 		ctx:        ctx,
 		pinning:    p,
 		gcLocker:   bs,
@@ -57,12 +54,7 @@ func NewAdder(ctx context.Context, p pin.Pinner, bs bstore.GCLocker, ds ipld.DAG
 		Pin:        true,
 		Trickle:    false,
 		Chunker:    "",
-		addt: 0,
-	}
-
-	a.fileQueue = newFileQueue(ctx, fileQueueConcurrency, a)
-
-	return a, nil
+	}, nil
 }
 
 // Adder holds the switches passed to the `add` command.
@@ -85,8 +77,6 @@ type Adder struct {
 	tempRoot   cid.Cid
 	CidBuilder cid.Builder
 	liveNodes  uint64
-	fileQueue  *fileQueue
-	addt int64
 }
 
 func (adder *Adder) mfsRoot() (*mfs.Root, error) {
@@ -115,12 +105,8 @@ func (adder *Adder) add(reader io.Reader) (ipld.Node, error) {
 		return nil, err
 	}
 
-bds := ipld.NewBufferedDAG(adder.ctx, adder.dagService)
-
-	start := time.Now()
 	params := ihelper.DagBuilderParams{
-		// Dagserv:    adder.bufferedDS,
-		Dagserv:    bds,
+		Dagserv:    adder.bufferedDS,
 		RawLeaves:  adder.RawLeaves,
 		Maxlinks:   ihelper.DefaultLinksPerBlock,
 		NoCopy:     adder.NoCopy,
@@ -141,11 +127,7 @@ bds := ipld.NewBufferedDAG(adder.ctx, adder.dagService)
 		return nil, err
 	}
 
-	// e := adder.bufferedDS.Commit()
-	e := bds.Commit()
-	adder.addt += int64(time.Since(start))
-	return nd, e
-	// return nd, adder.bufferedDS.Commit()
+	return nd, adder.bufferedDS.Commit()
 }
 
 // RootNode returns the mfs root node
@@ -280,20 +262,11 @@ func (adder *Adder) AddAllAndPin(file files.Node) (ipld.Node, error) {
 		}
 	}()
 
-	start := time.Now()
 	// if err := adder.addFileNode("", file, true); err != nil {
-	childrenChan := make(chan *ipldFileNode)
-	err := adder.walkFileNode(file, "", "", childrenChan)
+	nd, err := adder.addFileNode("", file, true)
 	if err != nil {
 		return nil, err
 	}
-
-	c := <- childrenChan
-	close(childrenChan)
-	nd := c.Node
-	cumulativet := int64(time.Since(start))
-fmt.Printf("%d milli-seconds add\n", adder.addt / 1000000)
-fmt.Printf("%d milli-seconds cumulative\n", cumulativet / 1000000)
 
 	// // get root
 	// mr, err := adder.mfsRoot()
@@ -346,6 +319,7 @@ fmt.Printf("%d milli-seconds cumulative\n", cumulativet / 1000000)
 	// if err != nil {
 	// 	return nil, err
 	// }
+
 	if !adder.Pin {
 		return nd, nil
 	}
@@ -353,7 +327,9 @@ fmt.Printf("%d milli-seconds cumulative\n", cumulativet / 1000000)
 }
 
 // func (adder *Adder) addFileNode(path string, file files.Node, toplevel bool) error {
-func (adder *Adder) walkFileNode(file files.Node, name string, path string, parentChan chan *ipldFileNode) error {
+func (adder *Adder) addFileNode(path string, file files.Node, toplevel bool) (ipld.Node, error) {
+	defer file.Close()
+
 	// err := adder.maybePauseForGC()
 	// if err != nil {
 	// 	return err
@@ -375,148 +351,13 @@ func (adder *Adder) walkFileNode(file files.Node, name string, path string, pare
 
 	switch f := file.(type) {
 	case files.Directory:
-		// return adder.addDir(path, f, toplevel)
-		return adder.walkDir(f, name, path, parentChan)
+		return adder.addDir(path, f, toplevel)
 	case *files.Symlink:
-		// return adder.addSymlink(path, f)
-		adder.fileQueue.enqueue(f, name, path, parentChan)
-		return nil
+		return adder.addSymlink(path, f)
 	case files.File:
-		// return adder.addFile(path, f)
-		adder.fileQueue.enqueue(f, name, path, parentChan)
-		return nil
+		return adder.addFile(path, f)
 	default:
-		return errors.New("unknown file type")
-	}
-}
-
-type ipldFileNode struct {
-	Node ipld.Node
-	Name string
-	Path string
-}
-
-type dirPathEntry struct {
-	Node files.Node
-	Name string
-	Path string
-}
-
-func (adder *Adder) walkDir(dir files.Directory, name string, path string, parentChan chan<- *ipldFileNode) error {
-	// fmt.Printf("walkDir %s\n", path)
-	childrenChan := make(chan *ipldFileNode, 1)
-
-	// TODO: streaming instead of read everything into array
-	var entries []*dirPathEntry
-	it := dir.Entries()
-	for it.Next() {
-		fpath := gopath.Join(path, it.Name())
-		entries = append(entries, &dirPathEntry{ it.Node(), it.Name(), fpath })
-	}
-
-	go func () {
-		count := len(entries)
-		children := make([]ipldFileNode, count)
-		for i := 0; i < count; i++ {
-			c := <- childrenChan
-			// fmt.Printf("c %s\n", c.Path)
-			outputDagnode(adder.Out, c.Path, c.Node)
-			children[i] = *c
-		}
-		close(childrenChan)
-		// fmt.Printf("done  1 %s\n", path)
-
-		d, err := adder.addDir(path, children)
-		if err != nil {
-			panic(fmt.Sprintf("got error adding dir %s %v", path, err))
-		}
-		// fmt.Printf("doneDir %s\n", path)
-		outputDagnode(adder.Out, path, d)
-		parentChan <- &ipldFileNode{ d, name, path }
-	}()
-
-	for _, e := range entries {
-		err := adder.walkFileNode(e.Node, e.Name, e.Path, childrenChan)
-		if err != nil {
-			return err
-		}
-	}
-
-	return nil
-}
-
-type fileQueue struct {
-	ctx context.Context
-	jobs chan *fileJob
-	adder *Adder
-}
-
-type fileJob struct {
-	File files.Node
-	Name string
-	Path string
-	Dirchan chan *ipldFileNode
-}
-
-func newFileQueue(ctx context.Context, size int, adder *Adder) *fileQueue {
-	jobs := make(chan *fileJob, size)
-	q := &fileQueue{ ctx, jobs, adder }
-
-	for i := 0; i < size; i++ {
-	    go q.worker()
-	}
-
-	return q
-}
-
-func (q *fileQueue) worker() {
-    for {
-        select {
-        case <-q.ctx.Done():
-            return
-
-        case job := <-q.jobs:
-            if q.ctx.Err() != nil {
-                return
-            }
-            q.process(job)
-        }
-    }
-}
-
-func (q *fileQueue) enqueue(file files.Node, name string, path string, dirchan chan *ipldFileNode) {
-	// fmt.Printf("enqueue %s\n", path)
-	q.jobs <- &fileJob{ file, name, path, dirchan }
-	// fmt.Printf("enqueued %s\n", path)
-}
-
-func (q *fileQueue) process(job *fileJob) () {
-	// fmt.Printf("process file %s\n", job.Path)
-	file := job.File
-	defer file.Close()
-
-	switch f := file.(type) {
-	case *files.Symlink:
-		nd, err := q.adder.addSymlink(job.Path, f)
-		if err != nil {
-			panic(fmt.Sprintf("error adding symlink %s %v", job.Path, err))
-			return
-		}
-		job.Dirchan <- &ipldFileNode{ nd, job.Name, job.Path }
-		return
-	case files.File:
-		// fmt.Printf("  add file %s\n", job.Path)
-		nd, err := q.adder.addFile(job.Path, f)
-		// fmt.Printf("  added file %s\n", job.Path)
-		if err != nil {
-			panic(fmt.Sprintf("error adding file %s %v", job.Path, err))
-			return
-		}
-		job.Dirchan <- &ipldFileNode{ nd, job.Name, job.Path }
-		// fmt.Printf("processed file %s\n", job.Path)
-		return
-	default:
-		panic("fileQueue process(): unknown file type")
+		return nil, errors.New("unknown file type")
 	}
 }
 
@@ -558,14 +399,14 @@ func (adder *Adder) addFile(path string, file files.File) (ipld.Node, error)  {
 		return nil, err
 	}
 
-	// err = adder.addNode(dagnode, path)
-	// if err != nil {
-	// 	return nil, err
-	// }
+	err = adder.addNode(dagnode, path)
+	if err != nil {
+		return nil, err
+	}
 	return dagnode, nil
 }
 
-func (adder *Adder) addDir(path string, children []ipldFileNode) (ipld.Node, error) {
+func (adder *Adder) addDir(path string, dir files.Directory, toplevel bool) (ipld.Node, error) {
 	log.Infof("adding directory: %s", path)
 
 	// if !(toplevel && path == "") {
@@ -585,8 +426,16 @@ func (adder *Adder) addDir(path string, children []ipldFileNode) (ipld.Node, err
 
 	unixdir := uio.NewDirectory(adder.dagService)
 
-	for _, f := range children {
-		err := unixdir.AddChild(adder.ctx, f.Name, f.Node)
+	it := dir.Entries()
+	for it.Next() {
+		fpath := gopath.Join(path, it.Name())
+		// err := adder.addFileNode(fpath, it.Node(), false)
+		nd, err := adder.addFileNode(fpath, it.Node(), false)
+		if err != nil {
+			return nil, err
+		}
+
+		err = unixdir.AddChild(adder.ctx, it.Name(), nd)
 		if err != nil {
 			return nil, err
 		}
@@ -602,14 +451,14 @@ func (adder *Adder) addDir(path string, children []ipldFileNode) (ipld.Node, err
 		return nil, err
 	}
 
-	// err = adder.addNode(dirnd, path)
-	// if err != nil {
-	// 	return nil, err
-	// }
+	err = adder.addNode(dirnd, path)
+	if err != nil {
+		return nil, err
+	}
 
-	// if it.Err() != nil {
-	// 	return nil, it.Err()
-	// }
+	if it.Err() != nil {
+		return nil, it.Err()
+	}
 
 	return dirnd, nil
 }
@@ -661,7 +510,7 @@ func getOutput(dagnode ipld.Node) (*coreiface.AddEvent, error) {
 	}
 
 	output := &coreiface.AddEvent{
-		Path: ipfspath.IpfsPath(c),
+		Path: path.IpfsPath(c),
 		Size: strconv.FormatUint(s, 10),
 	}
 

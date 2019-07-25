@@ -35,6 +35,7 @@ var log = logging.Logger("coreunix")
 const progressReaderIncrement = 1024 * 256
 
 const fileQueueConcurrency = 8
+// const fileQueueConcurrency = 5000
 
 var liveCacheSize = uint64(256 << 10)
 

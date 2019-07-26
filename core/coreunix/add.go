@@ -119,8 +119,8 @@ bds := ipld.NewBufferedDAG(adder.ctx, adder.dagService)
 
 	start := time.Now()
 	params := ihelper.DagBuilderParams{
-		// Dagserv:    adder.bufferedDS,
-		Dagserv:    bds,
+		// Dagserv:	adder.bufferedDS,
+		Dagserv:	bds,
 		RawLeaves:  adder.RawLeaves,
 		Maxlinks:   ihelper.DefaultLinksPerBlock,
 		NoCopy:     adder.NoCopy,
@@ -394,6 +394,7 @@ type ipldFileNode struct {
 	Node ipld.Node
 	Name string
 	Path string
+	IsDir bool
 }
 
 type dirPathEntry struct {
@@ -405,26 +406,27 @@ type dirPathEntry struct {
 func (adder *Adder) walkDir(dir files.Directory, name string, path string, parentChan chan<- *ipldFileNode) error {
 	// fmt.Printf("walkDir %s\n", path)
 	childrenChan := make(chan *ipldFileNode, 1)
-
-	// TODO: streaming instead of read everything into array
-	var entries []*dirPathEntry
-	it := dir.Entries()
-	for it.Next() {
-		fpath := gopath.Join(path, it.Name())
-		entries = append(entries, &dirPathEntry{ it.Node(), it.Name(), fpath })
-	}
+	entryCountChan := make(chan int, 1)
 
 	go func () {
-		count := len(entries)
-		children := make([]ipldFileNode, count)
-		for i := 0; i < count; i++ {
-			c := <- childrenChan
-			// fmt.Printf("c %s\n", c.Path)
-			outputDagnode(adder.Out, c.Path, c.Node)
-			children[i] = *c
+		var children []ipldFileNode
+
+		entryCount := -1
+		for ; entryCount == -1 || len(children) < entryCount ; {
+			select {
+				// TODO: Does entryCount need to be an atomic or is it
+				// guaranteed to be safe because we're reading from a channel?
+		        case entryCount = <- entryCountChan:
+		        case c := <- childrenChan:
+					// fmt.Printf("c %s\n", c.Path)
+					if !c.IsDir {
+						outputDagnode(adder.Out, c.Path, c.Node)
+					}
+					children = append(children, *c)
+					// fmt.Printf("%s %d\n", path, i)
+	        }
 		}
 		close(childrenChan)
-		// fmt.Printf("done  1 %s\n", path)
 
 		d, err := adder.addDir(path, children)
 		if err != nil {
@@ -432,15 +434,23 @@ func (adder *Adder) walkDir(dir files.Directory, name string, path string, paren
 		}
 		// fmt.Printf("doneDir %s\n", path)
 		outputDagnode(adder.Out, path, d)
-		parentChan <- &ipldFileNode{ d, name, path }
+		parentChan <- &ipldFileNode{ d, name, path, true }
 	}()
 
-	for _, e := range entries {
-		err := adder.walkFileNode(e.Node, e.Name, e.Path, childrenChan)
+	count := 0
+	it := dir.Entries()
+	for it.Next() {
+		fpath := gopath.Join(path, it.Name())
+		err := adder.walkFileNode(it.Node(), it.Name(), fpath, childrenChan)
 		if err != nil {
 			return err
 		}
+		count++
 	}
+	if err := it.Err(); err != nil {
+		panic(fmt.Sprintf("got error reading files from %s: %v", path, err))
+	}
+	entryCountChan <- count
 
 	return nil
 }
@@ -463,25 +473,25 @@ func newFileQueue(ctx context.Context, size int, adder *Adder) *fileQueue {
 	q := &fileQueue{ ctx, jobs, adder }
 
 	for i := 0; i < size; i++ {
-	    go q.worker()
+		go q.worker()
 	}
 
 	return q
 }
 
 func (q *fileQueue) worker() {
-    for {
-        select {
-        case <-q.ctx.Done():
-            return
+	for {
+		select {
+		case <-q.ctx.Done():
+			return
 
-        case job := <-q.jobs:
-            if q.ctx.Err() != nil {
-                return
-            }
-            q.process(job)
-        }
-    }
+		case job := <-q.jobs:
+			if q.ctx.Err() != nil {
+				return
+			}
+			q.process(job)
+		}
+	}
 }
 
 func (q *fileQueue) enqueue(file files.Node, name string, path string, dirchan chan *ipldFileNode) {
@@ -502,7 +512,7 @@ func (q *fileQueue) process(job *fileJob) () {
 			panic(fmt.Sprintf("error adding symlink %s %v", job.Path, err))
 			return
 		}
-		job.Dirchan <- &ipldFileNode{ nd, job.Name, job.Path }
+		job.Dirchan <- &ipldFileNode{ nd, job.Name, job.Path, false }
 		return
 	case files.File:
 		// fmt.Printf("  add file %s\n", job.Path)
@@ -512,7 +522,7 @@ func (q *fileQueue) process(job *fileJob) () {
 			panic(fmt.Sprintf("error adding file %s %v", job.Path, err))
 			return
 		}
-		job.Dirchan <- &ipldFileNode{ nd, job.Name, job.Path }
+		job.Dirchan <- &ipldFileNode{ nd, job.Name, job.Path, false }
 		// fmt.Printf("processed file %s\n", job.Path)
 		return
 	default:
